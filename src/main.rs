@@ -138,8 +138,23 @@ fn handle_log_message(db: &Database, ppid: u32, message: &str) -> Result<(), Box
     
     db.insert_log_entry(&entry)?;
     println!("✓ Logged");
-    
-    Ok(())
+    println!("Recent entries:");
+
+    // After logging, show recent entries from the current context
+    let list_args = Args {
+        message: None,
+        name: None,
+        list: None,       // default to 10
+        all: false,       // prefer current repo context if in one
+        repo: None,
+        filter: None,
+        today: false,
+        session: false,
+        verbose: false,   // compact format
+        reset: false,
+    };
+
+    handle_list_entries(db, &list_args)
 }
 
 fn handle_list_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
