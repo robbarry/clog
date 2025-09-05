@@ -39,6 +39,9 @@ struct Args {
     
     #[arg(long, help = "Use verbose output format")]
     verbose: bool,
+
+    #[arg(long, help = "Clear the database and exit")]
+    reset: bool,
 }
 
 fn main() {
@@ -51,6 +54,18 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    // Handle reset early and exit without other operations
+    if args.reset {
+        let db_path = db::Database::get_db_path();
+        match std::fs::remove_file(&db_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Box::new(e)),
+        }
+        println!("✓ Database cleared");
+        return Ok(());
+    }
+
     let db = Database::new()?;
     
     // Only need PID for write operations
