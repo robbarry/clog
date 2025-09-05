@@ -6,6 +6,8 @@ mod git;
 use clap::Parser;
 use chrono::Utc;
 use std::env;
+use std::io::IsTerminal;
+use std::path::Path;
 use std::process;
 use db::Database;
 use models::LogEntry;
@@ -221,22 +223,36 @@ fn handle_list_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::er
             println!("  {}", entry.message);
             println!();
         } else {
-            // Format branch name if available, truncate to 20 chars
-            let branch_str = if let Some(branch) = &entry.repo_branch {
-                let truncated = if branch.len() > 20 {
-                    format!("{}…", &branch[..19])
-                } else {
-                    branch.clone()
-                };
-                format!(" ({})", truncated)
-            } else {
-                String::new()
+            let use_color = std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
+            let icon = branch_icon(); // branch glyph (or ASCII if CLOG_ASCII is set)
+
+            // Repo basename (if available), truncate to 20 chars
+            let repo_name = entry
+                .repo_root
+                .as_deref()
+                .and_then(|r| Path::new(r).file_name())
+                .and_then(|os| os.to_str())
+                .map(|s| truncate_ellipsize(s, 20));
+
+            // Branch name (if available), truncate to 20 chars
+            let branch_name = entry
+                .repo_branch
+                .as_deref()
+                .map(|s| truncate_ellipsize(s, 20));
+
+            // Build compact inline repo/branch segment: " (repo  branch)"
+            let meta_str = match (repo_name.as_deref(), branch_name.as_deref()) {
+                (Some(r), Some(b)) => format!(" ({} {} {})", colorize(r, "1;32", use_color), colorize(icon, "35", use_color), colorize(b, "35", use_color)),
+                (Some(r), None) => format!(" ({})", colorize(r, "1;32", use_color)),
+                (None, Some(b)) => format!(" ({} {})", colorize(icon, "35", use_color), colorize(b, "35", use_color)),
+                (None, None) => String::new(),
             };
-            
-            println!("{} [{}]{} {}",
-                entry.timestamp.format("%H:%M:%S"),
-                entry.name.as_deref().unwrap_or("unknown"),
-                branch_str,
+
+            println!(
+                "{} [{}]{} {}",
+                colorize(&entry.timestamp.format("%H:%M:%S").to_string(), "90", use_color),
+                colorize(entry.name.as_deref().unwrap_or("unknown"), "36", use_color),
+                meta_str,
                 entry.message
             );
         }
@@ -288,22 +304,30 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
     let mut last_id: i64 = 0;
     for entry in entries {
         if let Some(id) = entry.id { last_id = id.max(last_id); }
-        // Format branch name if available, truncate to 20 chars
-        let branch_str = if let Some(branch) = &entry.repo_branch {
-            let truncated = if branch.len() > 20 {
-                format!("{}…", &branch[..19])
-            } else {
-                branch.clone()
-            };
-            format!(" ({})", truncated)
-        } else {
-            String::new()
+        let use_color = std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
+        let icon = branch_icon();
+        let repo_name = entry
+            .repo_root
+            .as_deref()
+            .and_then(|r| Path::new(r).file_name())
+            .and_then(|os| os.to_str())
+            .map(|s| truncate_ellipsize(s, 20));
+        let branch_name = entry
+            .repo_branch
+            .as_deref()
+            .map(|s| truncate_ellipsize(s, 20));
+        let meta_str = match (repo_name.as_deref(), branch_name.as_deref()) {
+            (Some(r), Some(b)) => format!(" ({} {} {})", colorize(r, "1;32", use_color), colorize(icon, "35", use_color), colorize(b, "35", use_color)),
+            (Some(r), None) => format!(" ({})", colorize(r, "1;32", use_color)),
+            (None, Some(b)) => format!(" ({} {})", colorize(icon, "35", use_color), colorize(b, "35", use_color)),
+            (None, None) => String::new(),
         };
-        
-        println!("{} [{}]{} {}",
-            entry.timestamp.format("%H:%M:%S"),
-            entry.name.as_deref().unwrap_or("unknown"),
-            branch_str,
+
+        println!(
+            "{} [{}]{} {}",
+            colorize(&entry.timestamp.format("%H:%M:%S").to_string(), "90", use_color),
+            colorize(entry.name.as_deref().unwrap_or("unknown"), "36", use_color),
+            meta_str,
             entry.message
         );
     }
@@ -330,22 +354,30 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
         if !new_entries.is_empty() {
             for entry in &new_entries {
                 if let Some(id) = entry.id { last_id = last_id.max(id); }
-                // Format branch name if available, truncate to 20 chars
-                let branch_str = if let Some(branch) = &entry.repo_branch {
-                    let truncated = if branch.len() > 20 {
-                        format!("{}…", &branch[..19])
-                    } else {
-                        branch.clone()
-                    };
-                    format!(" ({})", truncated)
-                } else {
-                    String::new()
+                let use_color = std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
+                let icon = branch_icon();
+                let repo_name = entry
+                    .repo_root
+                    .as_deref()
+                    .and_then(|r| Path::new(r).file_name())
+                    .and_then(|os| os.to_str())
+                    .map(|s| truncate_ellipsize(s, 20));
+                let branch_name = entry
+                    .repo_branch
+                    .as_deref()
+                    .map(|s| truncate_ellipsize(s, 20));
+                let meta_str = match (repo_name.as_deref(), branch_name.as_deref()) {
+                    (Some(r), Some(b)) => format!(" ({} {} {})", colorize(r, "1;32", use_color), colorize(icon, "35", use_color), colorize(b, "35", use_color)),
+                    (Some(r), None) => format!(" ({})", colorize(r, "1;32", use_color)),
+                    (None, Some(b)) => format!(" ({} {})", colorize(icon, "35", use_color), colorize(b, "35", use_color)),
+                    (None, None) => String::new(),
                 };
-                
-                println!("{} [{}]{} {}",
-                    entry.timestamp.format("%H:%M:%S"),
-                    entry.name.as_deref().unwrap_or("unknown"),
-                    branch_str,
+
+                println!(
+                    "{} [{}]{} {}",
+                    colorize(&entry.timestamp.format("%H:%M:%S").to_string(), "90", use_color),
+                    colorize(entry.name.as_deref().unwrap_or("unknown"), "36", use_color),
+                    meta_str,
                     entry.message
                 );
             }
@@ -355,4 +387,23 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
     }
 
     Ok(())
+}
+
+fn colorize(s: &str, code: &str, enable: bool) -> String {
+    if enable { format!("\x1b[{}m{}\x1b[0m", code, s) } else { s.to_string() }
+}
+
+fn truncate_ellipsize(s: &str, max: usize) -> String {
+    let len = s.chars().count();
+    if len > max {
+        let mut it = s.chars();
+        let truncated: String = it.by_ref().take(max.saturating_sub(1)).collect();
+        format!("{}…", truncated)
+    } else {
+        s.to_string()
+    }
+}
+
+fn branch_icon() -> &'static str {
+    if env::var_os("CLOG_ASCII").is_some() { "git" } else { "" }
 }
