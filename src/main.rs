@@ -205,11 +205,13 @@ fn handle_list_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::er
     
     for entry in entries {
         if args.verbose {
-            println!("[{}] {} ({})",
-                entry.timestamp.format("%Y-%m-%d %H:%M:%S"),
-                entry.name.as_deref().unwrap_or("unknown"),
-                shorten_path(&entry.directory)
-            );
+            let use_color = std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
+            let time_str = colorize(&entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(), "90", use_color);
+            let name_str = colorize(entry.name.as_deref().unwrap_or("unknown"), "36", use_color);
+            let dir_str = shorten_path(&entry.directory);
+            let ppid_str = colorize(&format!("[ppid {}]", entry.ppid), "90", use_color);
+
+            println!("[{}] {} ({}) {}", time_str, name_str, dir_str, ppid_str);
             
             if let (Some(root), Some(commit)) = (&entry.repo_root, &entry.repo_commit) {
                 let branch = entry.repo_branch.as_deref().unwrap_or("detached");
@@ -225,6 +227,7 @@ fn handle_list_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::er
         } else {
             let use_color = std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
             let icon = branch_icon(); // branch glyph (or ASCII if CLOG_ASCII is set)
+            let name_ppid = format_name_ppid(entry.name.as_deref(), entry.ppid, use_color);
 
             // Repo basename (if available), truncate to 20 chars
             let repo_name = entry
@@ -249,9 +252,9 @@ fn handle_list_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::er
             };
 
             println!(
-                "{} [{}]{} {}",
+                "{} {}{} {}",
                 colorize(&entry.timestamp.format("%H:%M:%S").to_string(), "90", use_color),
-                colorize(entry.name.as_deref().unwrap_or("unknown"), "36", use_color),
+                name_ppid,
                 meta_str,
                 entry.message
             );
@@ -306,6 +309,7 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
         if let Some(id) = entry.id { last_id = id.max(last_id); }
         let use_color = std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
         let icon = branch_icon();
+        let name_ppid = format_name_ppid(entry.name.as_deref(), entry.ppid, use_color);
         let repo_name = entry
             .repo_root
             .as_deref()
@@ -324,9 +328,9 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
         };
 
         println!(
-            "{} [{}]{} {}",
+            "{} {}{} {}",
             colorize(&entry.timestamp.format("%H:%M:%S").to_string(), "90", use_color),
-            colorize(entry.name.as_deref().unwrap_or("unknown"), "36", use_color),
+            name_ppid,
             meta_str,
             entry.message
         );
@@ -356,6 +360,7 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
                 if let Some(id) = entry.id { last_id = last_id.max(id); }
                 let use_color = std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
                 let icon = branch_icon();
+                let name_ppid = format_name_ppid(entry.name.as_deref(), entry.ppid, use_color);
                 let repo_name = entry
                     .repo_root
                     .as_deref()
@@ -374,9 +379,9 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
                 };
 
                 println!(
-                    "{} [{}]{} {}",
+                    "{} {}{} {}",
                     colorize(&entry.timestamp.format("%H:%M:%S").to_string(), "90", use_color),
-                    colorize(entry.name.as_deref().unwrap_or("unknown"), "36", use_color),
+                    name_ppid,
                     meta_str,
                     entry.message
                 );
@@ -406,4 +411,15 @@ fn truncate_ellipsize(s: &str, max: usize) -> String {
 
 fn branch_icon() -> &'static str {
     if env::var_os("CLOG_ASCII").is_some() { "git" } else { "" }
+}
+
+fn sep_glyph() -> &'static str {
+    if env::var_os("CLOG_ASCII").is_some() { ":" } else { "·" }
+}
+
+fn format_name_ppid(name: Option<&str>, ppid: u32, use_color: bool) -> String {
+    let n = colorize(name.unwrap_or("unknown"), "36", use_color);
+    let sep = sep_glyph();
+    let p = colorize(&ppid.to_string(), "90", use_color);
+    format!("[{}{}{}]", n, sep, p)
 }

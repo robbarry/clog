@@ -24,7 +24,7 @@ After‑log preview (issue #6)
 Features
 - Session tracking: Finds a stable parent process via process‑tree climbing and associates logs to that session. Name the session once with `--name`; later logs reuse it automatically.
 - Git‑aware: When run inside a Git worktree, each entry captures repo root, branch, and commit for powerful filtering. Outside Git, logs still work with directory context.
-- Compact and verbose views: Default compact output for quick scanning; `--verbose` adds timestamp, session, directory, and repo details.
+- Compact and verbose views: Default compact output for quick scanning; `--verbose` adds timestamp, session, directory, repo details — both views now also show the parent PID for clear session context.
 - Fast local storage: Single SQLite DB at `~/.clog/clog.db` with useful indexes for snappy queries.
 - Upcoming: `--reset` flag to clear the database, and `--stream` for real‑time monitoring.
 
@@ -63,7 +63,7 @@ Command Reference
 - `--filter <NAME>`: Only show entries whose session name matches NAME
 - `--today`: Restrict to entries from the current day (local time)
 - `--session`: Restrict to entries from the active session (auto‑detected via parent PID)
-- `--verbose`: Show expanded details (timestamps, directory, repo branch/commit)
+- `--verbose`: Show expanded details (timestamps, directory, repo branch/commit, ppid)
 - `--reset` (upcoming): Clear the database and exit
 - `--stream` (upcoming): Follow new entries as they are logged (real‑time monitoring)
 - `<message>` (positional): If provided, log this message
