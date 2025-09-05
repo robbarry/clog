@@ -43,6 +43,9 @@ struct Args {
     #[arg(long, help = "Use verbose output format")]
     verbose: bool,
 
+    #[arg(long, help = "Clear the database and exit")]
+    reset: bool,
+
     #[arg(long, help = "Stream new entries in real-time (tail -f style)")]
     stream: bool,
 }
@@ -57,6 +60,18 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    // Handle reset early and exit without other operations
+    if args.reset {
+        let db_path = db::Database::get_db_path();
+        match std::fs::remove_file(&db_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Box::new(e)),
+        }
+        println!("✓ Database cleared");
+        return Ok(());
+    }
+
     let db = Database::new()?;
     
     // Only need PID for write operations
@@ -131,8 +146,24 @@ fn handle_log_message(db: &Database, ppid: u32, message: &str) -> Result<(), Box
     
     db.insert_log_entry(&entry)?;
     println!("✓ Logged");
-    
-    Ok(())
+    println!("Recent entries:");
+
+    // After logging, show recent entries from the current context
+    let list_args = Args {
+        message: None,
+        name: None,
+        list: None,       // default to 10
+        all: false,       // prefer current repo context if in one
+        repo: None,
+        filter: None,
+        today: false,
+        session: false,
+        verbose: false,   // compact format
+        reset: false,
+        stream: false,
+    };
+
+    handle_list_entries(db, &list_args)
 }
 
 fn handle_list_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::error::Error>> {

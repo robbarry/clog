@@ -21,7 +21,7 @@ impl Database {
         Ok(db)
     }
     
-    fn get_db_path() -> PathBuf {
+    pub fn get_db_path() -> PathBuf {
         if let Some(home) = home_dir() {
             home.join(".clog").join("clog.db")
         } else {
