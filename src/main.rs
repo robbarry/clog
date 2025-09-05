@@ -81,13 +81,17 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             process::id()
         });
         
-        if let Some(name) = args.name {
-            handle_name_registration(&db, ppid, &name)?;
-            return Ok(());
+        // Handle both name and message if both are provided
+        if let Some(name) = &args.name {
+            handle_name_registration(&db, ppid, name)?;
+            // Only return if there's no message to log
+            if args.message.is_none() {
+                return Ok(());
+            }
         }
         
-        if let Some(message) = args.message {
-            handle_log_message(&db, ppid, &message)?;
+        if let Some(message) = &args.message {
+            handle_log_message(&db, ppid, message)?;
         }
     } else if args.stream {
         handle_stream_entries(&db, &args)?;
