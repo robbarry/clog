@@ -236,4 +236,63 @@ impl Database {
         
         Ok(entries)
     }
+
+    pub fn list_entries_since(&self, last_id: i64, repo_root: Option<&str>,
+                              filter_name: Option<&str>, today_only: bool,
+                              session_id: Option<&str>) -> Result<Vec<LogEntry>> {
+        let mut query = String::from(
+            "SELECT id, ppid, name, timestamp, directory, message, session_id,
+                    repo_root, repo_branch, repo_commit
+             FROM log_entries WHERE id > ?"
+        );
+
+        let mut dyn_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        dyn_params.push(Box::new(last_id));
+
+        if let Some(root) = repo_root {
+            query.push_str(" AND repo_root = ?");
+            dyn_params.push(Box::new(root.to_string()));
+        }
+
+        if let Some(name) = filter_name {
+            query.push_str(" AND name = ?");
+            dyn_params.push(Box::new(name.to_string()));
+        }
+
+        if let Some(sid) = session_id {
+            query.push_str(" AND session_id = ?");
+            dyn_params.push(Box::new(sid.to_string()));
+        }
+
+        if today_only {
+            query.push_str(" AND date(timestamp) = date('now')");
+        }
+
+        // Ascending so we print in order of arrival
+        query.push_str(" ORDER BY id ASC");
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = dyn_params.iter()
+            .map(|b| &**b as &dyn rusqlite::ToSql)
+            .collect();
+
+        let entries = stmt.query_map(&param_refs[..], |row| {
+            Ok(LogEntry {
+                id: Some(row.get(0)?),
+                ppid: row.get(1)?,
+                name: row.get(2)?,
+                timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+                    .unwrap().with_timezone(&Utc),
+                directory: row.get(4)?,
+                message: row.get(5)?,
+                session_id: row.get(6)?,
+                repo_root: row.get(7)?,
+                repo_branch: row.get(8)?,
+                repo_commit: row.get(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+
+        Ok(entries)
+    }
 }

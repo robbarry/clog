@@ -9,6 +9,9 @@ use std::env;
 use std::process;
 use db::Database;
 use models::LogEntry;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::thread;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Fast changelog tool with session tracking")]
@@ -39,6 +42,9 @@ struct Args {
     
     #[arg(long, help = "Use verbose output format")]
     verbose: bool,
+
+    #[arg(long, help = "Stream new entries in real-time (tail -f style)")]
+    stream: bool,
 }
 
 fn main() {
@@ -68,6 +74,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(message) = args.message {
             handle_log_message(&db, ppid, &message)?;
         }
+    } else if args.stream {
+        handle_stream_entries(&db, &args)?;
     } else {
         handle_list_entries(&db, &args)?;
     }
@@ -197,4 +205,80 @@ fn shorten_path(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    // Determine filters (respect current repo by default, unless --all or --repo provided)
+    let current_repo = if !args.all && args.repo.is_none() {
+        env::current_dir().ok()
+            .and_then(|cwd| git::detect_repo_info(&cwd))
+            .map(|info| info.root)
+    } else {
+        None
+    };
+
+    let repo_filter = args.repo.as_deref().or(current_repo.as_deref());
+
+    let session_id = if args.session {
+        let ppid = session::get_ppid().unwrap_or_else(|| process::id());
+        db.get_active_session(ppid)?.map(|s| s.session_id)
+    } else {
+        None
+    };
+
+    // Initial fetch: last 10 entries
+    let mut entries = db.list_entries(
+        10,
+        repo_filter,
+        args.filter.as_deref(),
+        args.today,
+        session_id.as_deref(),
+    )?;
+    entries.reverse();
+
+    // Print initial entries in compact format
+    let mut last_id: i64 = 0;
+    for entry in entries {
+        if let Some(id) = entry.id { last_id = id.max(last_id); }
+        println!("{} [{}] {}",
+            entry.timestamp.format("%H:%M:%S"),
+            entry.name.as_deref().unwrap_or("unknown"),
+            entry.message
+        );
+    }
+
+    // Setup Ctrl+C handler
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let running = running.clone();
+        let _ = ctrlc::set_handler(move || {
+            running.store(false, Ordering::SeqCst);
+        });
+    }
+
+    // Poll loop
+    while running.load(Ordering::SeqCst) {
+        let new_entries = db.list_entries_since(
+            last_id,
+            repo_filter,
+            args.filter.as_deref(),
+            args.today,
+            session_id.as_deref(),
+        )?;
+
+        if !new_entries.is_empty() {
+            for entry in &new_entries {
+                if let Some(id) = entry.id { last_id = last_id.max(id); }
+                println!("{} [{}] {}",
+                    entry.timestamp.format("%H:%M:%S"),
+                    entry.name.as_deref().unwrap_or("unknown"),
+                    entry.message
+                );
+            }
+        }
+
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    Ok(())
 }
