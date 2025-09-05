@@ -221,9 +221,22 @@ fn handle_list_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::er
             println!("  {}", entry.message);
             println!();
         } else {
-            println!("{} [{}] {}",
+            // Format branch name if available, truncate to 20 chars
+            let branch_str = if let Some(branch) = &entry.repo_branch {
+                let truncated = if branch.len() > 20 {
+                    format!("{}…", &branch[..19])
+                } else {
+                    branch.clone()
+                };
+                format!(" ({})", truncated)
+            } else {
+                String::new()
+            };
+            
+            println!("{} [{}]{} {}",
                 entry.timestamp.format("%H:%M:%S"),
                 entry.name.as_deref().unwrap_or("unknown"),
+                branch_str,
                 entry.message
             );
         }
@@ -275,9 +288,22 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
     let mut last_id: i64 = 0;
     for entry in entries {
         if let Some(id) = entry.id { last_id = id.max(last_id); }
-        println!("{} [{}] {}",
+        // Format branch name if available, truncate to 20 chars
+        let branch_str = if let Some(branch) = &entry.repo_branch {
+            let truncated = if branch.len() > 20 {
+                format!("{}…", &branch[..19])
+            } else {
+                branch.clone()
+            };
+            format!(" ({})", truncated)
+        } else {
+            String::new()
+        };
+        
+        println!("{} [{}]{} {}",
             entry.timestamp.format("%H:%M:%S"),
             entry.name.as_deref().unwrap_or("unknown"),
+            branch_str,
             entry.message
         );
     }
@@ -304,9 +330,22 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
         if !new_entries.is_empty() {
             for entry in &new_entries {
                 if let Some(id) = entry.id { last_id = last_id.max(id); }
-                println!("{} [{}] {}",
+                // Format branch name if available, truncate to 20 chars
+                let branch_str = if let Some(branch) = &entry.repo_branch {
+                    let truncated = if branch.len() > 20 {
+                        format!("{}…", &branch[..19])
+                    } else {
+                        branch.clone()
+                    };
+                    format!(" ({})", truncated)
+                } else {
+                    String::new()
+                };
+                
+                println!("{} [{}]{} {}",
                     entry.timestamp.format("%H:%M:%S"),
                     entry.name.as_deref().unwrap_or("unknown"),
+                    branch_str,
                     entry.message
                 );
             }
