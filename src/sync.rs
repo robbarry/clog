@@ -1,62 +1,23 @@
-use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
-use std::time::Duration;
-use std::thread;
-use crate::credentials;
+use tokio_postgres::{NoTls, Client};
+use postgres_native_tls::MakeTlsConnector;
+use native_tls::TlsConnector;
 use crate::db::Database;
+use crate::credentials;
 
 const BATCH_SIZE: usize = 100;
-const MAX_RETRIES: u32 = 5;
-const RETRY_BASE_DELAY_MS: u64 = 1000;
-
-#[derive(Debug, Serialize)]
-struct EventBatch {
-    events: Vec<SyncEvent>,
-    device_id: String,
-}
-
-#[derive(Debug, Serialize)]
-struct SyncEvent {
-    event_id: String,
-    ppid: u32,
-    name: Option<String>,
-    timestamp: String,  // Use string for simpler serialization
-    directory: String,
-    message: String,
-    session_id: String,
-    repo_root: Option<String>,
-    repo_branch: Option<String>,
-    repo_commit: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SyncResponse {
-    success: bool,
-    message: Option<String>,
-    synced_count: Option<usize>,
-}
 
 pub struct SyncClient {
-    client: Client,
-    credentials: credentials::Credentials,
     device_id: String,
 }
 
 impl SyncClient {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let creds = credentials::get_credentials()?
-            .ok_or("No sync credentials configured. Run 'clog --login' first.")?;
+        // Load .env file
+        dotenv::dotenv().ok();
         
         let device_id = crate::device::get_or_create_device_id()?;
         
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()?;
-        
         Ok(SyncClient {
-            client,
-            credentials: creds,
             device_id,
         })
     }
@@ -66,8 +27,51 @@ impl SyncClient {
             return Err("Pull sync not yet implemented. Use --push-only flag.".into());
         }
         
+        // Run async sync in blocking context
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(self.async_sync_push(db))
+    }
+    
+    async fn async_sync_push(&self, db: &Database) -> Result<(), Box<dyn std::error::Error>> {
+        // Resolve database URL from env/.env/config
+        let database_url = credentials::get_credentials()?
+            .map(|c| c.database_url)
+            .ok_or("No database credentials configured. Run 'clog --login' or set DATABASE_URL")?;
+        
+        // Connect to Postgres with SSL if required
+        let client = if database_url.contains("sslmode=require") {
+            let connector = TlsConnector::builder()
+                .danger_accept_invalid_certs(true) // For Digital Ocean self-signed certs
+                .build()?;
+            let connector = MakeTlsConnector::new(connector);
+            
+            let (client, connection) = tokio_postgres::connect(&database_url, connector).await?;
+            
+            // Spawn connection handler
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("Postgres connection error: {}", e);
+                }
+            });
+            
+            client
+        } else {
+            let (client, connection) = tokio_postgres::connect(&database_url, NoTls).await?;
+            
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("Postgres connection error: {}", e);
+                }
+            });
+            
+            client
+        };
+        
+        // Create schema if needed
+        self.ensure_schema(&client).await?;
+        
+        // Sync in batches
         loop {
-            // Get batch of unsynced entries
             let entries = db.get_unsynced_entries(BATCH_SIZE)?;
             
             if entries.is_empty() {
@@ -77,96 +81,91 @@ impl SyncClient {
             
             println!("Syncing {} entries...", entries.len());
             
-            // Convert to sync events
-            let events: Vec<SyncEvent> = entries.iter().map(|e| SyncEvent {
-                event_id: e.event_id.clone().unwrap_or_default(),
-                ppid: e.ppid,
-                name: e.name.clone(),
-                timestamp: e.timestamp.to_rfc3339(),
-                directory: e.directory.clone(),
-                message: e.message.clone(),
-                session_id: e.session_id.clone(),
-                repo_root: e.repo_root.clone(),
-                repo_branch: e.repo_branch.clone(),
-                repo_commit: e.repo_commit.clone(),
-            }).collect();
+            let mut synced_ids = Vec::new();
             
-            let event_ids: Vec<String> = entries.iter()
-                .filter_map(|e| e.event_id.clone())
-                .collect();
-            
-            let batch = EventBatch {
-                events,
-                device_id: self.device_id.clone(),
-            };
-            
-            // Send with retries
-            let result = self.send_batch_with_retry(&batch)?;
-            
-            if result.success {
-                // Mark entries as synced
-                db.mark_entries_synced(&event_ids)?;
+            for entry in &entries {
+                let event_id = entry.event_id.as_ref()
+                    .ok_or("Entry missing event_id")?;
                 
-                // Update sync state watermark
-                db.update_sync_watermark(&self.credentials.server_url)?;
+                // Insert into Postgres (upsert to handle duplicates)
+                let result = client.execute(
+                    "INSERT INTO log_entries (
+                        event_id, device_id, ppid, name, timestamp, 
+                        directory, message, session_id, 
+                        repo_root, repo_branch, repo_commit
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    ON CONFLICT (event_id) DO NOTHING",
+                    &[
+                        &event_id,
+                        &self.device_id,
+                        &(entry.ppid as i32),
+                        &entry.name,
+                        &entry.timestamp,
+                        &entry.directory,
+                        &entry.message,
+                        &entry.session_id,
+                        &entry.repo_root,
+                        &entry.repo_branch,
+                        &entry.repo_commit,
+                    ]
+                ).await;
                 
-                println!("✓ Synced {} entries", result.synced_count.unwrap_or(event_ids.len()));
-            } else {
-                return Err(format!("Sync failed: {}", 
-                    result.message.unwrap_or_else(|| "Unknown error".to_string())).into());
+                match result {
+                    Ok(_) => {
+                        synced_ids.push(event_id.clone());
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to sync entry {}: {}", event_id, e);
+                        // Continue with other entries
+                    }
+                }
             }
+            
+            // Mark successfully synced entries in local DB
+            if !synced_ids.is_empty() {
+                db.mark_entries_synced(&synced_ids)?;
+                println!("✓ Synced {} entries", synced_ids.len());
+            }
+            
+            // Update sync state in Postgres
+            client.execute(
+                "INSERT INTO sync_state (device_id, last_sync_at) 
+                 VALUES ($1, CURRENT_TIMESTAMP)
+                 ON CONFLICT (device_id) 
+                 DO UPDATE SET last_sync_at = CURRENT_TIMESTAMP",
+                &[&self.device_id]
+            ).await?;
         }
         
         Ok(())
     }
     
-    fn send_batch_with_retry(&self, batch: &EventBatch) -> Result<SyncResponse, Box<dyn std::error::Error>> {
-        let url = format!("{}/v1/events/batch", self.credentials.server_url);
+    async fn ensure_schema(&self, client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+        // Check if tables exist, create if needed
+        let table_exists = client.query_one(
+            "SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'log_entries'
+            )",
+            &[]
+        ).await?;
         
-        let mut retry_count = 0;
-        let mut delay_ms = RETRY_BASE_DELAY_MS;
+        let exists: bool = table_exists.get(0);
         
-        loop {
-            match self.client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.credentials.token))
-                .json(&batch)
-                .send()
-            {
-                Ok(response) => {
-                    if response.status().is_success() {
-                        return response.json::<SyncResponse>()
-                            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>);
-                    }
-                    
-                    if response.status().is_client_error() {
-                        // Client errors are not retryable
-                        let status = response.status();
-                        let text = response.text().unwrap_or_else(|_| "No response body".to_string());
-                        return Err(format!("Client error {}: {}", status, text).into());
-                    }
-                    
-                    // Server error - retry
-                    if retry_count >= MAX_RETRIES {
-                        return Err(format!("Server error after {} retries: {}", 
-                            MAX_RETRIES, response.status()).into());
-                    }
-                }
-                Err(e) => {
-                    // Network error - retry
-                    if retry_count >= MAX_RETRIES {
-                        return Err(format!("Network error after {} retries: {}", 
-                            MAX_RETRIES, e).into());
-                    }
-                }
-            }
+        if !exists {
+            println!("Creating database schema...");
             
-            // Exponential backoff
-            thread::sleep(Duration::from_millis(delay_ms));
-            delay_ms = (delay_ms * 2).min(30000); // Cap at 30 seconds
-            retry_count += 1;
+            // Read schema.sql file
+            let schema = std::fs::read_to_string("schema.sql")
+                .unwrap_or_else(|_| include_str!("../schema.sql").to_string());
             
-            println!("Retry {} of {}...", retry_count, MAX_RETRIES);
+            // Execute schema
+            client.batch_execute(&schema).await?;
+            
+            println!("✓ Database schema created");
         }
+        
+        Ok(())
     }
 }
