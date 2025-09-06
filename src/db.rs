@@ -131,9 +131,10 @@ impl Database {
     }
     
     fn get_or_create_device_id(&self) -> Result<String> {
-        // For migration, generate a placeholder device ID
-        // This will be replaced with proper device ID generation in issue #28
-        Ok("TEMP_DEVICE_ID".to_string())
+        crate::device::get_or_create_device_id()
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(
+                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            ))
     }
     
     fn migrate_to_v3(&self) -> Result<()> {

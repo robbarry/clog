@@ -2,6 +2,7 @@ mod models;
 mod db;
 mod session;
 mod git;
+mod device;
 
 use clap::Parser;
 use chrono::Utc;
@@ -50,6 +51,9 @@ struct Args {
 
     #[arg(long, help = "Stream new entries in real-time (tail -f style)")]
     stream: bool,
+
+    #[arg(long, help = "Show system information")]
+    info: bool,
 }
 
 fn main() {
@@ -62,6 +66,12 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    // Handle info command early
+    if args.info {
+        handle_info_command()?;
+        return Ok(());
+    }
+    
     // Handle reset early and exit without other operations
     if args.reset {
         let db_path = db::Database::get_db_path();
@@ -167,6 +177,7 @@ fn handle_log_message(db: &Database, ppid: u32, message: &str) -> Result<(), Box
         verbose: false,   // compact format
         reset: false,
         stream: false,
+        info: false,
     };
 
     handle_list_entries(db, &list_args)
@@ -391,6 +402,47 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
         thread::sleep(Duration::from_millis(500));
     }
 
+    Ok(())
+}
+
+fn handle_info_command() -> Result<(), Box<dyn std::error::Error>> {
+    use rusqlite::Connection;
+    
+    let device_id = device::get_or_create_device_id()?;
+    let db_path = db::Database::get_db_path();
+    
+    println!("Device ID: {}", device_id);
+    println!("Database: {}", db_path.display());
+    
+    if db_path.exists() {
+        let conn = Connection::open(&db_path)?;
+        
+        // Get schema version
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        println!("Schema Version: {}", version);
+        
+        // Get entry count
+        let entry_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM log_entries", 
+            [], 
+            |row| row.get(0)
+        ).unwrap_or(0);
+        println!("Total Entries: {}", entry_count);
+        
+        // Get session count
+        let session_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sessions", 
+            [], 
+            |row| row.get(0)
+        ).unwrap_or(0);
+        println!("Total Sessions: {}", session_count);
+        
+        // Check sync status (for future implementation)
+        println!("Sync: Not configured");
+    } else {
+        println!("Database: Not initialized");
+    }
+    
     Ok(())
 }
 
