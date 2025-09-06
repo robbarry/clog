@@ -3,6 +3,7 @@ mod db;
 mod session;
 mod git;
 mod device;
+mod credentials;
 
 use clap::Parser;
 use chrono::Utc;
@@ -54,6 +55,12 @@ struct Args {
 
     #[arg(long, help = "Show system information")]
     info: bool,
+
+    #[arg(long, help = "Configure sync credentials")]
+    login: bool,
+
+    #[arg(long, help = "Remove sync credentials")]
+    logout: bool,
 }
 
 fn main() {
@@ -69,6 +76,18 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Handle info command early
     if args.info {
         handle_info_command()?;
+        return Ok(());
+    }
+    
+    // Handle login command
+    if args.login {
+        handle_login_command()?;
+        return Ok(());
+    }
+    
+    // Handle logout command
+    if args.logout {
+        handle_logout_command()?;
         return Ok(());
     }
     
@@ -178,6 +197,8 @@ fn handle_log_message(db: &Database, ppid: u32, message: &str) -> Result<(), Box
         reset: false,
         stream: false,
         info: false,
+        login: false,
+        logout: false,
     };
 
     handle_list_entries(db, &list_args)
@@ -437,12 +458,60 @@ fn handle_info_command() -> Result<(), Box<dyn std::error::Error>> {
         ).unwrap_or(0);
         println!("Total Sessions: {}", session_count);
         
-        // Check sync status (for future implementation)
-        println!("Sync: Not configured");
+        // Check sync status
+        match credentials::get_credentials() {
+            Ok(Some(creds)) => {
+                println!("Sync: Configured ({})", creds.server_url);
+            }
+            Ok(None) => {
+                println!("Sync: Not configured");
+            }
+            Err(_) => {
+                println!("Sync: Error reading credentials");
+            }
+        }
     } else {
         println!("Database: Not initialized (expected at {})", db_path.display());
     }
     
+    Ok(())
+}
+
+fn handle_login_command() -> Result<(), Box<dyn std::error::Error>> {
+    use rpassword::prompt_password;
+    use std::io::{self, Write};
+    
+    // Prompt for server URL
+    print!("Server URL: ");
+    io::stdout().flush()?;
+    let mut server_url = String::new();
+    io::stdin().read_line(&mut server_url)?;
+    let server_url = server_url.trim().to_string();
+    
+    if server_url.is_empty() {
+        return Err("Server URL cannot be empty".into());
+    }
+    
+    // Prompt for token (hidden input)
+    let token = prompt_password("Token: ")?;
+    
+    if token.is_empty() {
+        return Err("Token cannot be empty".into());
+    }
+    
+    // Save credentials
+    let creds = credentials::Credentials {
+        server_url,
+        token,
+    };
+    
+    credentials::save_credentials(&creds)?;
+    
+    Ok(())
+}
+
+fn handle_logout_command() -> Result<(), Box<dyn std::error::Error>> {
+    credentials::delete_credentials()?;
     Ok(())
 }
 
