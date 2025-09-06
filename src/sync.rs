@@ -1,8 +1,8 @@
 use tokio_postgres::{NoTls, Client};
 use postgres_native_tls::MakeTlsConnector;
 use native_tls::TlsConnector;
-use std::env;
 use crate::db::Database;
+use crate::credentials;
 
 const BATCH_SIZE: usize = 100;
 
@@ -33,9 +33,10 @@ impl SyncClient {
     }
     
     async fn async_sync_push(&self, db: &Database) -> Result<(), Box<dyn std::error::Error>> {
-        // Get database connection string from environment
-        let database_url = env::var("DATABASE_URL")
-            .map_err(|_| "DATABASE_URL not found. Please set it in .env file or environment")?;
+        // Resolve database URL from env/.env/config
+        let database_url = credentials::get_credentials()?
+            .map(|c| c.database_url)
+            .ok_or("No database credentials configured. Run 'clog --login' or set DATABASE_URL")?;
         
         // Connect to Postgres with SSL if required
         let client = if database_url.contains("sslmode=require") {
