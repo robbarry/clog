@@ -4,7 +4,6 @@ mod session;
 mod git;
 mod device;
 mod credentials;
-mod sync;
 
 use clap::Parser;
 use chrono::Utc;
@@ -48,26 +47,11 @@ struct Args {
     #[arg(long, help = "Use verbose output format")]
     verbose: bool,
 
-    #[arg(long, help = "Clear the database and exit")]
-    reset: bool,
-
     #[arg(long, help = "Stream new entries in real-time (tail -f style)")]
     stream: bool,
 
     #[arg(long, help = "Show system information")]
     info: bool,
-
-    #[arg(long, help = "Configure sync credentials")]
-    login: bool,
-
-    #[arg(long, help = "Remove sync credentials")]
-    logout: bool,
-
-    #[arg(long, help = "Sync logs to remote server")]
-    sync: bool,
-
-    #[arg(long, help = "Push only (no pull) during sync")]
-    push_only: bool,
 }
 
 fn main() {
@@ -86,36 +70,6 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     
-    // Handle login command
-    if args.login {
-        handle_login_command()?;
-        return Ok(());
-    }
-    
-    // Handle logout command
-    if args.logout {
-        handle_logout_command()?;
-        return Ok(());
-    }
-    
-    // Handle sync command
-    if args.sync {
-        handle_sync_command(args.push_only)?;
-        return Ok(());
-    }
-    
-    // Handle reset early and exit without other operations
-    if args.reset {
-        let db_path = db::Database::get_db_path();
-        match std::fs::remove_file(&db_path) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(Box::new(e)),
-        }
-        println!("✓ Database cleared");
-        return Ok(());
-    }
-
     let db = Database::new()?;
     
     // Only need PID for write operations
@@ -191,6 +145,7 @@ fn handle_log_message(db: &Database, ppid: u32, message: &str) -> Result<(), Box
         repo_branch: repo_info.as_ref().and_then(|r| r.branch.clone()),
         repo_commit: repo_info.as_ref().map(|r| r.commit.clone()),
         event_id: None,
+        received_at: None,
     };
     
     db.insert_log_entry(&entry)?;
@@ -208,13 +163,8 @@ fn handle_log_message(db: &Database, ppid: u32, message: &str) -> Result<(), Box
         today: false,
         session: false,
         verbose: false,   // compact format
-        reset: false,
         stream: false,
         info: false,
-        login: false,
-        logout: false,
-        sync: false,
-        push_only: false,
     };
 
     handle_list_entries(db, &list_args)
@@ -347,14 +297,14 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
         repo_filter,
         args.filter.as_deref(),
         args.today,
-        session_id.as_deref(),
+        session_id.as_deref()
     )?;
     entries.reverse();
 
     // Print initial entries in compact format
-    let mut last_id: i64 = 0;
+    let mut last_received: Option<chrono::DateTime<chrono::Utc>> = None;
     for entry in entries {
-        if let Some(id) = entry.id { last_id = id.max(last_id); }
+        if let Some(ts) = entry.received_at { last_received = Some(last_received.map(|lr| lr.max(ts)).unwrap_or(ts)); }
         let use_color = std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
         let icon = branch_icon();
         let name_ppid = format_name_ppid(entry.name.as_deref(), entry.ppid, use_color);
@@ -395,8 +345,9 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
 
     // Poll loop
     while running.load(Ordering::SeqCst) {
-        let new_entries = db.list_entries_since(
-            last_id,
+        let since = last_received.unwrap_or_else(|| Utc::now());
+        let new_entries = db.list_entries_received_after(
+            since,
             repo_filter,
             args.filter.as_deref(),
             args.today,
@@ -405,7 +356,7 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
 
         if !new_entries.is_empty() {
             for entry in &new_entries {
-                if let Some(id) = entry.id { last_id = last_id.max(id); }
+                if let Some(ts) = entry.received_at { last_received = Some(last_received.map(|lr| lr.max(ts)).unwrap_or(ts)); }
                 let use_color = std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
                 let icon = branch_icon();
                 let name_ppid = format_name_ppid(entry.name.as_deref(), entry.ppid, use_color);
@@ -443,105 +394,18 @@ fn handle_stream_entries(db: &Database, args: &Args) -> Result<(), Box<dyn std::
 }
 
 fn handle_info_command() -> Result<(), Box<dyn std::error::Error>> {
-    use rusqlite::Connection;
-    
+    dotenv::dotenv().ok();
     let device_id = device::get_or_create_device_id()?;
-    let db_path = db::Database::get_db_path();
-    
     println!("Device ID: {}", device_id);
-    
-    if db_path.exists() {
-        println!("Database: {}", db_path.display());
-        let conn = Connection::open(&db_path)?;
-        
-        // Get schema version
-        let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        println!("Schema Version: {}", version);
-        
-        // Get entry count
-        let entry_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM log_entries", 
-            [], 
-            |row| row.get(0)
-        ).unwrap_or(0);
-        println!("Total Entries: {}", entry_count);
-        
-        // Get session count
-        let session_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sessions", 
-            [], 
-            |row| row.get(0)
-        ).unwrap_or(0);
-        println!("Total Sessions: {}", session_count);
-        
-        // Check sync status
-        match credentials::get_credentials() {
-            Ok(Some(creds)) => {
-                println!("Sync: Configured (database)");
-            }
-            Ok(None) => {
-                println!("Sync: Not configured");
-            }
-            Err(_) => {
-                println!("Sync: Error reading credentials");
-            }
-        }
-    } else {
-        println!("Database: Not initialized (expected at {})", db_path.display());
+    // Attempt to connect to Postgres and report status
+    match Database::new() {
+        Ok(_db) => println!("Database: Connected (PostgreSQL)"),
+        Err(e) => println!("Database: Connection failed - {}", e),
     }
-    
     Ok(())
 }
 
-fn handle_login_command() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::{self, Write};
-    
-    // Check if DATABASE_URL is already set
-    if credentials::get_credentials()?.is_some() {
-        println!("Database credentials already configured.");
-        print!("Overwrite? (y/n): ");
-        io::stdout().flush()?;
-        let mut answer = String::new();
-        io::stdin().read_line(&mut answer)?;
-        if !answer.trim().eq_ignore_ascii_case("y") {
-            return Ok(());
-        }
-    }
-    
-    // Prompt for database URL
-    println!("Enter PostgreSQL database URL:");
-    println!("Format: postgresql://user:password@host:port/database");
-    print!("Database URL: ");
-    io::stdout().flush()?;
-    let mut database_url = String::new();
-    io::stdin().read_line(&mut database_url)?;
-    let database_url = database_url.trim().to_string();
-    
-    if database_url.is_empty() {
-        return Err("Database URL cannot be empty".into());
-    }
-    
-    // Save credentials
-    let creds = credentials::Credentials {
-        database_url,
-    };
-    
-    credentials::save_credentials(&creds)?;
-    
-    Ok(())
-}
-
-fn handle_logout_command() -> Result<(), Box<dyn std::error::Error>> {
-    credentials::delete_credentials()?;
-    Ok(())
-}
-
-fn handle_sync_command(push_only: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let db = Database::new()?;
-    let client = sync::SyncClient::new()?;
-    client.sync_push(&db, push_only)?;
-    Ok(())
-}
+// sync/login/logout removed
 
 fn colorize(s: &str, code: &str, enable: bool) -> String {
     if enable { format!("\x1b[{}m{}\x1b[0m", code, s) } else { s.to_string() }

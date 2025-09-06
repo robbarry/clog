@@ -13,6 +13,7 @@ pub struct LogEntry {
     pub repo_branch: Option<String>,
     pub repo_commit: Option<String>,
     pub event_id: Option<String>,
+    pub received_at: Option<DateTime<Utc>>, // server-side insert time (Postgres)
 }
 
 #[derive(Debug, Clone)]
