@@ -412,9 +412,9 @@ fn handle_info_command() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = db::Database::get_db_path();
     
     println!("Device ID: {}", device_id);
-    println!("Database: {}", db_path.display());
     
     if db_path.exists() {
+        println!("Database: {}", db_path.display());
         let conn = Connection::open(&db_path)?;
         
         // Get schema version
@@ -440,7 +440,7 @@ fn handle_info_command() -> Result<(), Box<dyn std::error::Error>> {
         // Check sync status (for future implementation)
         println!("Sync: Not configured");
     } else {
-        println!("Database: Not initialized");
+        println!("Database: Not initialized (expected at {})", db_path.display());
     }
     
     Ok(())
