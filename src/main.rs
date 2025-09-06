@@ -3,6 +3,8 @@ mod db;
 mod session;
 mod git;
 mod device;
+mod credentials;
+mod sync;
 
 use clap::Parser;
 use chrono::Utc;
@@ -54,6 +56,18 @@ struct Args {
 
     #[arg(long, help = "Show system information")]
     info: bool,
+
+    #[arg(long, help = "Configure sync credentials")]
+    login: bool,
+
+    #[arg(long, help = "Remove sync credentials")]
+    logout: bool,
+
+    #[arg(long, help = "Sync logs to remote server")]
+    sync: bool,
+
+    #[arg(long, help = "Push only (no pull) during sync")]
+    push_only: bool,
 }
 
 fn main() {
@@ -69,6 +83,24 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Handle info command early
     if args.info {
         handle_info_command()?;
+        return Ok(());
+    }
+    
+    // Handle login command
+    if args.login {
+        handle_login_command()?;
+        return Ok(());
+    }
+    
+    // Handle logout command
+    if args.logout {
+        handle_logout_command()?;
+        return Ok(());
+    }
+    
+    // Handle sync command
+    if args.sync {
+        handle_sync_command(args.push_only)?;
         return Ok(());
     }
     
@@ -158,6 +190,7 @@ fn handle_log_message(db: &Database, ppid: u32, message: &str) -> Result<(), Box
         repo_root: repo_info.as_ref().map(|r| r.root.clone()),
         repo_branch: repo_info.as_ref().and_then(|r| r.branch.clone()),
         repo_commit: repo_info.as_ref().map(|r| r.commit.clone()),
+        event_id: None,
     };
     
     db.insert_log_entry(&entry)?;
@@ -178,6 +211,10 @@ fn handle_log_message(db: &Database, ppid: u32, message: &str) -> Result<(), Box
         reset: false,
         stream: false,
         info: false,
+        login: false,
+        logout: false,
+        sync: false,
+        push_only: false,
     };
 
     handle_list_entries(db, &list_args)
@@ -437,12 +474,67 @@ fn handle_info_command() -> Result<(), Box<dyn std::error::Error>> {
         ).unwrap_or(0);
         println!("Total Sessions: {}", session_count);
         
-        // Check sync status (for future implementation)
-        println!("Sync: Not configured");
+        // Check sync status
+        match credentials::get_credentials() {
+            Ok(Some(creds)) => {
+                println!("Sync: Configured ({})", creds.server_url);
+            }
+            Ok(None) => {
+                println!("Sync: Not configured");
+            }
+            Err(_) => {
+                println!("Sync: Error reading credentials");
+            }
+        }
     } else {
         println!("Database: Not initialized (expected at {})", db_path.display());
     }
     
+    Ok(())
+}
+
+fn handle_login_command() -> Result<(), Box<dyn std::error::Error>> {
+    use rpassword::prompt_password;
+    use std::io::{self, Write};
+    
+    // Prompt for server URL
+    print!("Server URL: ");
+    io::stdout().flush()?;
+    let mut server_url = String::new();
+    io::stdin().read_line(&mut server_url)?;
+    let server_url = server_url.trim().to_string();
+    
+    if server_url.is_empty() {
+        return Err("Server URL cannot be empty".into());
+    }
+    
+    // Prompt for token (hidden input)
+    let token = prompt_password("Token: ")?;
+    
+    if token.is_empty() {
+        return Err("Token cannot be empty".into());
+    }
+    
+    // Save credentials
+    let creds = credentials::Credentials {
+        server_url,
+        token,
+    };
+    
+    credentials::save_credentials(&creds)?;
+    
+    Ok(())
+}
+
+fn handle_logout_command() -> Result<(), Box<dyn std::error::Error>> {
+    credentials::delete_credentials()?;
+    Ok(())
+}
+
+fn handle_sync_command(push_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let db = Database::new()?;
+    let client = sync::SyncClient::new()?;
+    client.sync_push(&db, push_only)?;
     Ok(())
 }
 

@@ -12,6 +12,7 @@ pub struct LogEntry {
     pub repo_root: Option<String>,
     pub repo_branch: Option<String>,
     pub repo_commit: Option<String>,
+    pub event_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
