@@ -137,36 +137,60 @@ impl Database {
     }
     
     fn migrate_to_v3(&self) -> Result<()> {
-        // Check if migration is needed
-        let event_id_exists: bool = self.conn.query_row(
+        // Run the migration in a single transaction to avoid partial states
+        self.conn.execute_batch("BEGIN IMMEDIATE;")?;
+
+        // Determine which columns already exist
+        let has_event_id: bool = self.conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('log_entries') WHERE name = 'event_id'",
             [],
-            |row| row.get(0)
+            |row| row.get(0),
         ).unwrap_or(0) > 0;
-        
-        if event_id_exists {
-            // Already migrated
-            self.conn.execute("PRAGMA user_version = 3", [])?;
-            return Ok(());
+        let has_device_id_le: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('log_entries') WHERE name = 'device_id'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0) > 0;
+        let has_synced_at: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('log_entries') WHERE name = 'synced_at'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0) > 0;
+        let has_sync_attempts: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('log_entries') WHERE name = 'sync_attempts'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0) > 0;
+
+        // Add missing columns to log_entries
+        if !has_event_id {
+            self.conn.execute("ALTER TABLE log_entries ADD COLUMN event_id TEXT", [])?;
         }
-        
-        let device_id = self.get_or_create_device_id()?;
-        
-        // Add new columns to log_entries
-        self.conn.execute_batch(
-            "ALTER TABLE log_entries ADD COLUMN event_id TEXT;
-             ALTER TABLE log_entries ADD COLUMN device_id TEXT;
-             ALTER TABLE log_entries ADD COLUMN synced_at TEXT;
-             ALTER TABLE log_entries ADD COLUMN sync_attempts INTEGER DEFAULT 0;"
-        )?;
-        
-        // Add device_id to sessions
-        self.conn.execute(
-            "ALTER TABLE sessions ADD COLUMN device_id TEXT",
-            []
-        )?;
-        
-        // Create sync_state table
+        if !has_device_id_le {
+            self.conn.execute("ALTER TABLE log_entries ADD COLUMN device_id TEXT", [])?;
+        }
+        if !has_synced_at {
+            self.conn.execute("ALTER TABLE log_entries ADD COLUMN synced_at TEXT", [])?;
+        }
+        if !has_sync_attempts {
+            self.conn.execute(
+                "ALTER TABLE log_entries ADD COLUMN sync_attempts INTEGER DEFAULT 0",
+                [],
+            )?;
+        }
+
+        // Ensure sessions has device_id
+        let has_device_id_sess: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'device_id'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0) > 0;
+        if !has_device_id_sess {
+            self.conn
+                .execute("ALTER TABLE sessions ADD COLUMN device_id TEXT", [])?;
+        }
+
+        // Ensure sync_state exists
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sync_state (
                 server_url TEXT PRIMARY KEY,
@@ -174,37 +198,45 @@ impl Database {
                 last_pushed TEXT,
                 last_pulled TEXT,
                 last_sync_at TEXT
-            );"
+            );",
         )?;
-        
-        // Backfill existing data with ULIDs and device_id
-        let mut stmt = self.conn.prepare("SELECT id, timestamp FROM log_entries ORDER BY id")?;
-        let entries: Vec<(i64, String)> = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?.collect::<Result<Vec<_>>>()?;
-        
-        for (id, _timestamp) in entries {
-            let ulid = Ulid::new().to_string();
-            self.conn.execute(
-                "UPDATE log_entries SET event_id = ?, device_id = ? WHERE id = ?",
-                params![ulid, &device_id, id]
-            )?;
+
+        // Backfill existing data with ULIDs and device_id where missing
+        let device_id = self.get_or_create_device_id()?;
+        if !has_event_id || !has_device_id_le {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM log_entries WHERE event_id IS NULL OR device_id IS NULL ORDER BY id")?;
+            let ids: Vec<i64> = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>>>()?;
+
+            for id in ids {
+                let ulid = Ulid::new().to_string();
+                self.conn.execute(
+                    "UPDATE log_entries SET event_id = COALESCE(event_id, ?), device_id = COALESCE(device_id, ?) WHERE id = ?",
+                    params![ulid, &device_id, id],
+                )?;
+            }
         }
-        
-        // Backfill sessions with device_id
+
+        // Backfill sessions with device_id if missing
         self.conn.execute(
-            "UPDATE sessions SET device_id = ?",
-            params![&device_id]
+            "UPDATE sessions SET device_id = COALESCE(device_id, ?)",
+            params![&device_id],
         )?;
-        
-        // Create indexes
+
+        // Ensure indexes exist (idempotent)
         self.conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_event_id ON log_entries(event_id);
              CREATE INDEX IF NOT EXISTS idx_device_time ON log_entries(device_id, timestamp);
-             CREATE INDEX IF NOT EXISTS idx_sync_pending ON log_entries(sync_attempts, id);
-             PRAGMA user_version = 3;"
+             CREATE INDEX IF NOT EXISTS idx_sync_pending ON log_entries(sync_attempts, id);",
         )?;
-        
+
+        // Mark schema as upgraded
+        self.conn.execute("PRAGMA user_version = 3", [])?;
+        self.conn.execute_batch("COMMIT;")?;
+
         Ok(())
     }
     
