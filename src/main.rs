@@ -4,6 +4,7 @@ mod session;
 mod git;
 mod device;
 mod credentials;
+mod sync;
 
 use clap::Parser;
 use chrono::Utc;
@@ -61,6 +62,12 @@ struct Args {
 
     #[arg(long, help = "Remove sync credentials")]
     logout: bool,
+
+    #[arg(long, help = "Sync logs to remote server")]
+    sync: bool,
+
+    #[arg(long, help = "Push only (no pull) during sync")]
+    push_only: bool,
 }
 
 fn main() {
@@ -88,6 +95,12 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Handle logout command
     if args.logout {
         handle_logout_command()?;
+        return Ok(());
+    }
+    
+    // Handle sync command
+    if args.sync {
+        handle_sync_command(args.push_only)?;
         return Ok(());
     }
     
@@ -177,6 +190,7 @@ fn handle_log_message(db: &Database, ppid: u32, message: &str) -> Result<(), Box
         repo_root: repo_info.as_ref().map(|r| r.root.clone()),
         repo_branch: repo_info.as_ref().and_then(|r| r.branch.clone()),
         repo_commit: repo_info.as_ref().map(|r| r.commit.clone()),
+        event_id: None,
     };
     
     db.insert_log_entry(&entry)?;
@@ -199,6 +213,8 @@ fn handle_log_message(db: &Database, ppid: u32, message: &str) -> Result<(), Box
         info: false,
         login: false,
         logout: false,
+        sync: false,
+        push_only: false,
     };
 
     handle_list_entries(db, &list_args)
@@ -512,6 +528,13 @@ fn handle_login_command() -> Result<(), Box<dyn std::error::Error>> {
 
 fn handle_logout_command() -> Result<(), Box<dyn std::error::Error>> {
     credentials::delete_credentials()?;
+    Ok(())
+}
+
+fn handle_sync_command(push_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let db = Database::new()?;
+    let client = sync::SyncClient::new()?;
+    client.sync_push(&db, push_only)?;
     Ok(())
 }
 

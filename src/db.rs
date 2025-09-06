@@ -372,6 +372,7 @@ impl Database {
                 repo_root: row.get(7)?,
                 repo_branch: row.get(8)?,
                 repo_commit: row.get(9)?,
+                event_id: None,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -431,10 +432,68 @@ impl Database {
                 repo_root: row.get(7)?,
                 repo_branch: row.get(8)?,
                 repo_commit: row.get(9)?,
+                event_id: None,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
 
         Ok(entries)
+    }
+    
+    pub fn get_unsynced_entries(&self, limit: usize) -> Result<Vec<LogEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ppid, name, timestamp, directory, message, session_id,
+                    repo_root, repo_branch, repo_commit, event_id
+             FROM log_entries 
+             WHERE synced_at IS NULL
+             ORDER BY id ASC
+             LIMIT ?"
+        )?;
+        
+        let entries = stmt.query_map(params![limit], |row| {
+            Ok(LogEntry {
+                id: Some(row.get(0)?),
+                ppid: row.get(1)?,
+                name: row.get(2)?,
+                timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+                    .unwrap().with_timezone(&Utc),
+                directory: row.get(4)?,
+                message: row.get(5)?,
+                session_id: row.get(6)?,
+                repo_root: row.get(7)?,
+                repo_branch: row.get(8)?,
+                repo_commit: row.get(9)?,
+                event_id: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+        
+        Ok(entries)
+    }
+    
+    pub fn mark_entries_synced(&self, event_ids: &[String]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        
+        for event_id in event_ids {
+            self.conn.execute(
+                "UPDATE log_entries SET synced_at = ?, sync_attempts = 0 WHERE event_id = ?",
+                params![&now, event_id]
+            )?;
+        }
+        
+        Ok(())
+    }
+    
+    pub fn update_sync_watermark(&self, server_url: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let device_id = self.get_or_create_device_id()?;
+        
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sync_state (server_url, device_id, last_pushed, last_sync_at)
+             VALUES (?, ?, ?, ?)",
+            params![server_url, device_id, &now, &now]
+        )?;
+        
+        Ok(())
     }
 }
