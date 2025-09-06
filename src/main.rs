@@ -477,7 +477,7 @@ fn handle_info_command() -> Result<(), Box<dyn std::error::Error>> {
         // Check sync status
         match credentials::get_credentials() {
             Ok(Some(creds)) => {
-                println!("Sync: Configured ({})", creds.server_url);
+                println!("Sync: Configured (database)");
             }
             Ok(None) => {
                 println!("Sync: Not configured");
@@ -494,31 +494,36 @@ fn handle_info_command() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn handle_login_command() -> Result<(), Box<dyn std::error::Error>> {
-    use rpassword::prompt_password;
     use std::io::{self, Write};
     
-    // Prompt for server URL
-    print!("Server URL: ");
-    io::stdout().flush()?;
-    let mut server_url = String::new();
-    io::stdin().read_line(&mut server_url)?;
-    let server_url = server_url.trim().to_string();
-    
-    if server_url.is_empty() {
-        return Err("Server URL cannot be empty".into());
+    // Check if DATABASE_URL is already set
+    if credentials::get_credentials()?.is_some() {
+        println!("Database credentials already configured.");
+        print!("Overwrite? (y/n): ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            return Ok(());
+        }
     }
     
-    // Prompt for token (hidden input)
-    let token = prompt_password("Token: ")?;
+    // Prompt for database URL
+    println!("Enter PostgreSQL database URL:");
+    println!("Format: postgresql://user:password@host:port/database");
+    print!("Database URL: ");
+    io::stdout().flush()?;
+    let mut database_url = String::new();
+    io::stdin().read_line(&mut database_url)?;
+    let database_url = database_url.trim().to_string();
     
-    if token.is_empty() {
-        return Err("Token cannot be empty".into());
+    if database_url.is_empty() {
+        return Err("Database URL cannot be empty".into());
     }
     
     // Save credentials
     let creds = credentials::Credentials {
-        server_url,
-        token,
+        database_url,
     };
     
     credentials::save_credentials(&creds)?;
