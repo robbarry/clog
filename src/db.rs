@@ -2,9 +2,10 @@ use rusqlite::{Connection, Result, params, OptionalExtension};
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use dirs::home_dir;
+use ulid::Ulid;
 use crate::models::{LogEntry, Session};
 
-const CURRENT_VERSION: i32 = 2;
+const CURRENT_VERSION: i32 = 3;
 
 pub struct Database {
     conn: Connection,
@@ -45,10 +46,16 @@ impl Database {
             self.migrate_to_v2()?;
         }
         
+        if version < 3 {
+            self.migrate_to_v3()?;
+        }
+        
         Ok(())
     }
     
     fn create_initial_schema(&self) -> Result<()> {
+        let _device_id = self.get_or_create_device_id()?;
+        
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS log_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,7 +67,11 @@ impl Database {
                 session_id TEXT NOT NULL,
                 repo_root TEXT,
                 repo_branch TEXT,
-                repo_commit TEXT
+                repo_commit TEXT,
+                event_id TEXT UNIQUE,
+                device_id TEXT,
+                synced_at TEXT,
+                sync_attempts INTEGER DEFAULT 0
             );
             
             CREATE TABLE IF NOT EXISTS sessions (
@@ -69,7 +80,16 @@ impl Database {
                 name TEXT,
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL,
-                is_active BOOLEAN DEFAULT 1
+                is_active BOOLEAN DEFAULT 1,
+                device_id TEXT
+            );
+            
+            CREATE TABLE IF NOT EXISTS sync_state (
+                server_url TEXT PRIMARY KEY,
+                device_id TEXT,
+                last_pushed TEXT,
+                last_pulled TEXT,
+                last_sync_at TEXT
             );
             
             CREATE INDEX IF NOT EXISTS idx_ppid ON log_entries(ppid);
@@ -78,9 +98,14 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_session_active ON sessions(ppid, is_active);
             CREATE INDEX IF NOT EXISTS idx_repo_root_time ON log_entries(repo_root, timestamp);
             CREATE INDEX IF NOT EXISTS idx_repo_commit ON log_entries(repo_commit);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_event_id ON log_entries(event_id);
+            CREATE INDEX IF NOT EXISTS idx_device_time ON log_entries(device_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_sync_pending ON log_entries(sync_attempts, id);
             
-            PRAGMA user_version = 2;"
-        )
+            PRAGMA user_version = 3;"
+        )?;
+        
+        Ok(())
     }
     
     fn migrate_to_v2(&self) -> Result<()> {
@@ -103,6 +128,84 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_repo_commit ON log_entries(repo_commit);
              PRAGMA user_version = 2;"
         )
+    }
+    
+    fn get_or_create_device_id(&self) -> Result<String> {
+        // For migration, generate a placeholder device ID
+        // This will be replaced with proper device ID generation in issue #28
+        Ok("TEMP_DEVICE_ID".to_string())
+    }
+    
+    fn migrate_to_v3(&self) -> Result<()> {
+        // Check if migration is needed
+        let event_id_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('log_entries') WHERE name = 'event_id'",
+            [],
+            |row| row.get(0)
+        ).unwrap_or(0) > 0;
+        
+        if event_id_exists {
+            // Already migrated
+            self.conn.execute("PRAGMA user_version = 3", [])?;
+            return Ok(());
+        }
+        
+        let device_id = self.get_or_create_device_id()?;
+        
+        // Add new columns to log_entries
+        self.conn.execute_batch(
+            "ALTER TABLE log_entries ADD COLUMN event_id TEXT;
+             ALTER TABLE log_entries ADD COLUMN device_id TEXT;
+             ALTER TABLE log_entries ADD COLUMN synced_at TEXT;
+             ALTER TABLE log_entries ADD COLUMN sync_attempts INTEGER DEFAULT 0;"
+        )?;
+        
+        // Add device_id to sessions
+        self.conn.execute(
+            "ALTER TABLE sessions ADD COLUMN device_id TEXT",
+            []
+        )?;
+        
+        // Create sync_state table
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sync_state (
+                server_url TEXT PRIMARY KEY,
+                device_id TEXT,
+                last_pushed TEXT,
+                last_pulled TEXT,
+                last_sync_at TEXT
+            );"
+        )?;
+        
+        // Backfill existing data with ULIDs and device_id
+        let mut stmt = self.conn.prepare("SELECT id, timestamp FROM log_entries ORDER BY id")?;
+        let entries: Vec<(i64, String)> = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?.collect::<Result<Vec<_>>>()?;
+        
+        for (id, _timestamp) in entries {
+            let ulid = Ulid::new().to_string();
+            self.conn.execute(
+                "UPDATE log_entries SET event_id = ?, device_id = ? WHERE id = ?",
+                params![ulid, &device_id, id]
+            )?;
+        }
+        
+        // Backfill sessions with device_id
+        self.conn.execute(
+            "UPDATE sessions SET device_id = ?",
+            params![&device_id]
+        )?;
+        
+        // Create indexes
+        self.conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_event_id ON log_entries(event_id);
+             CREATE INDEX IF NOT EXISTS idx_device_time ON log_entries(device_id, timestamp);
+             CREATE INDEX IF NOT EXISTS idx_sync_pending ON log_entries(sync_attempts, id);
+             PRAGMA user_version = 3;"
+        )?;
+        
+        Ok(())
     }
     
     pub fn get_active_session(&self, ppid: u32) -> Result<Option<Session>> {
@@ -132,11 +235,12 @@ impl Database {
     pub fn create_session(&self, ppid: u32) -> Result<String> {
         let now = Utc::now();
         let session_id = format!("{}_{}", ppid, now.timestamp());
+        let device_id = self.get_or_create_device_id()?;
         
         self.conn.execute(
-            "INSERT INTO sessions (session_id, ppid, first_seen, last_seen, is_active)
-             VALUES (?, ?, ?, ?, 1)",
-            params![session_id, ppid, now.to_rfc3339(), now.to_rfc3339()]
+            "INSERT INTO sessions (session_id, ppid, first_seen, last_seen, is_active, device_id)
+             VALUES (?, ?, ?, ?, 1, ?)",
+            params![session_id, ppid, now.to_rfc3339(), now.to_rfc3339(), device_id]
         )?;
         
         Ok(session_id)
@@ -159,10 +263,13 @@ impl Database {
     }
     
     pub fn insert_log_entry(&self, entry: &LogEntry) -> Result<()> {
+        let event_id = Ulid::new().to_string();
+        let device_id = self.get_or_create_device_id()?;
+        
         self.conn.execute(
             "INSERT INTO log_entries (ppid, name, timestamp, directory, message, session_id,
-                                      repo_root, repo_branch, repo_commit)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                      repo_root, repo_branch, repo_commit, event_id, device_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 entry.ppid,
                 entry.name,
@@ -172,7 +279,9 @@ impl Database {
                 entry.session_id,
                 entry.repo_root,
                 entry.repo_branch,
-                entry.repo_commit
+                entry.repo_commit,
+                event_id,
+                device_id
             ]
         )?;
         Ok(())

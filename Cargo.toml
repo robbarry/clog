@@ -10,6 +10,7 @@ chrono = "0.4"
 sysinfo = "0.31"
 dirs = "5.0"
 ctrlc = "3.4"
+ulid = "1.1"
 
 [profile.release]
 opt-level = 3
